@@ -304,6 +304,115 @@ test("custom provider with npm package", async () => {
   })
 })
 
+test("navy provider keeps fallback models when discovery fails", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(JSON.stringify({ error: { message: "boom" } }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        expect(providers[ProviderID.navy]).toBeDefined()
+        expect(providers[ProviderID.navy].models["gpt-5"]).toBeDefined()
+        expect(providers[ProviderID.navy].models["gpt-5"].api.url).toBe("https://api.navy/v1")
+        expect(providers[ProviderID.navy].options.apiKey).toBe("sk-navy-test-key")
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
+test("navy provider discovers chat completion models", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(
+        JSON.stringify({
+          object: "list",
+          data: [
+            {
+              id: "claude-opus-4.7",
+              object: "model",
+              owned_by: "anthropic",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Max",
+            },
+            {
+              id: "gpt-image-2",
+              object: "model",
+              owned_by: "openai",
+              endpoint: "/v1/images/generations",
+              premium: true,
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        const model = providers[ProviderID.navy].models["claude-opus-4.7"]
+        expect(model).toBeDefined()
+        expect(model.family).toBe("anthropic")
+        expect(model.api.npm).toBe("@ai-sdk/openai-compatible")
+        expect(model.capabilities.attachment).toBe(true)
+        expect(model.capabilities.toolcall).toBe(true)
+        expect(model.limit.context).toBe(200000)
+        expect(providers[ProviderID.navy].models["gpt-image-2"]).toBeUndefined()
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
 test("env variable takes precedence, config merges options", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

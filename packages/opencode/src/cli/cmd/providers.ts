@@ -350,11 +350,12 @@ export const ProvidersLoginCommand = cmd({
         const priority: Record<string, number> = {
           opencode: 0,
           openai: 1,
-          "github-copilot": 2,
-          google: 3,
-          anthropic: 4,
-          openrouter: 5,
-          vercel: 6,
+          navy: 2,
+          "github-copilot": 3,
+          google: 4,
+          anthropic: 5,
+          openrouter: 6,
+          vercel: 7,
         }
         const pluginProviders = resolvePluginProviders({
           hooks,
@@ -455,6 +456,10 @@ export const ProvidersLoginCommand = cmd({
 
         if (provider === "vercel") {
           prompts.log.info("You can create an api key at https://vercel.link/ai-gateway-token")
+        }
+
+        if (provider === "navy") {
+          prompts.log.info("NavyAI uses NAVY_API_KEY and the OpenAI-compatible endpoint https://api.navy/v1")
         }
 
         if (["cloudflare", "cloudflare-ai-gateway"].includes(provider)) {

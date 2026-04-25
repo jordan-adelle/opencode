@@ -138,6 +138,111 @@ function useLanguageModel(sdk: any) {
   return sdk.responses === undefined && sdk.chat === undefined
 }
 
+type NavyModel = {
+  id: string
+  owned_by?: string
+  endpoint?: string
+  premium?: boolean
+  required_plan?: string
+}
+
+function navyKey(provider: Info, auth?: Auth.Info, envApiKey?: string) {
+  if (typeof provider.options?.apiKey === "string" && provider.options.apiKey.trim() !== "") {
+    return provider.options.apiKey.trim()
+  }
+  if (auth?.type === "api") return auth.key
+  if (typeof envApiKey === "string" && envApiKey.trim() !== "") return envApiKey.trim()
+}
+
+function navyTitle(id: string) {
+  return id
+    .split(/[-_/]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
+}
+
+function navyReasoning(id: string) {
+  const value = id.toLowerCase()
+  return ["reasoning", "thinking", "o1", "o3", "o4", "gpt-5", "deepseek-r1", "grok-4"].some((item) =>
+    value.includes(item),
+  )
+}
+
+function navyAttachment(id: string) {
+  const value = id.toLowerCase()
+  return ["gpt-4", "gpt-5", "claude", "gemini", "pixtral", "vision", "vl", "image"].some((item) =>
+    value.includes(item),
+  )
+}
+
+function navyLimit(id: string) {
+  const value = id.toLowerCase()
+  if (value.includes("claude")) return { context: 200000, output: 16384 }
+  if (value.includes("gemini")) return { context: 200000, output: 32000 }
+  if (value.includes("gpt-5")) return { context: 128000, output: 8192 }
+  return { context: 128000, output: 8192 }
+}
+
+function navyModel(item: NavyModel): Model {
+  const attachment = navyAttachment(item.id)
+  const limit = navyLimit(item.id)
+  return {
+    id: ModelID.make(item.id),
+    providerID: ProviderID.navy,
+    name: navyTitle(item.id),
+    family: item.owned_by ?? "",
+    api: {
+      id: item.id,
+      url: "https://api.navy/v1",
+      npm: "@ai-sdk/openai-compatible",
+    },
+    status: "active",
+    headers: {},
+    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit,
+    capabilities: {
+      temperature: true,
+      reasoning: navyReasoning(item.id),
+      attachment,
+      toolcall: true,
+      input: {
+        text: true,
+        audio: false,
+        image: attachment,
+        video: false,
+        pdf: attachment,
+      },
+      output: {
+        text: true,
+        audio: false,
+        image: false,
+        video: false,
+        pdf: false,
+      },
+      interleaved: false,
+    },
+    release_date: "",
+    variants: {},
+  }
+}
+
+async function navyDiscover(apiKey?: string): Promise<Record<string, Model>> {
+  const res = await fetch("https://api.navy/v1/models", {
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!res.ok) return {}
+  const body = (await res.json()) as { data?: NavyModel[] }
+  if (!Array.isArray(body.data)) return {}
+  return Object.fromEntries(
+    body.data
+      .filter((item) => item.endpoint === "/v1/chat/completions")
+      .map((item) => [item.id, navyModel(item)]),
+  )
+}
+
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
     anthropic: () =>
@@ -180,6 +285,21 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         },
         options: {},
       }),
+    navy: Effect.fnUntraced(function* (provider: Info) {
+      const auth = yield* dep.auth(provider.id)
+      const envApiKey = yield* dep.get("NAVY_API_KEY")
+      const apiKey = navyKey(provider, auth, envApiKey)
+
+      return {
+        autoload: !!apiKey,
+        options: {
+          apiKey,
+        },
+        async discoverModels() {
+          return navyDiscover(apiKey)
+        },
+      }
+    }),
     xai: () =>
       Effect.succeed({
         autoload: false,
@@ -1284,18 +1404,20 @@ const layer: Layer.Layer<
           mergeProvider(providerID, partial)
         }
 
-        const gitlab = ProviderID.make("gitlab")
-        if (discoveryLoaders[gitlab] && providers[gitlab] && isProviderAllowed(gitlab)) {
+        for (const [id, discoverModels] of Object.entries(discoveryLoaders)) {
+          const providerID = ProviderID.make(id)
+          if (!providers[providerID] || !isProviderAllowed(providerID)) continue
+
           yield* Effect.promise(async () => {
             try {
-              const discovered = await discoveryLoaders[gitlab]()
+              const discovered = await discoverModels()
               for (const [modelID, model] of Object.entries(discovered)) {
-                if (!providers[gitlab].models[modelID]) {
-                  providers[gitlab].models[modelID] = model
+                if (!providers[providerID].models[modelID]) {
+                  providers[providerID].models[modelID] = model
                 }
               }
             } catch (e) {
-              log.warn("state discovery error", { id: "gitlab", error: e })
+              log.warn("state discovery error", { id, error: e })
             }
           })
         }

@@ -101,6 +101,73 @@ export const Provider = Schema.Struct({
 
 export type Provider = Schema.Schema.Type<typeof Provider>
 
+function navy(
+  id: string,
+  input: {
+    name: string
+    context: number
+    output: number
+    reasoning?: boolean
+    attachment?: boolean
+  },
+): Model {
+  return {
+    id,
+    name: input.name,
+    family: "",
+    release_date: "",
+    attachment: input.attachment ?? false,
+    reasoning: input.reasoning ?? false,
+    temperature: true,
+    tool_call: true,
+    limit: {
+      context: input.context,
+      output: input.output,
+    },
+    modalities: {
+      input: ["text", ...(input.attachment ? (["image", "pdf"] as const) : [])],
+      output: ["text"],
+    },
+    provider: {
+      api: "https://api.navy/v1",
+      npm: "@ai-sdk/openai-compatible",
+    },
+  }
+}
+
+const BUILTIN_PROVIDERS: Record<string, Provider> = {
+  navy: {
+    id: "navy",
+    name: "NavyAI",
+    env: ["NAVY_API_KEY"],
+    api: "https://api.navy/v1",
+    npm: "@ai-sdk/openai-compatible",
+    models: {
+      "gpt-5": navy("gpt-5", {
+        name: "GPT-5",
+        context: 128000,
+        output: 8192,
+        reasoning: true,
+        attachment: true,
+      }),
+      "claude-sonnet-4.6": navy("claude-sonnet-4.6", {
+        name: "Claude Sonnet 4.6",
+        context: 200000,
+        output: 16384,
+        reasoning: true,
+        attachment: true,
+      }),
+      "gemini-2.5-pro": navy("gemini-2.5-pro", {
+        name: "Gemini 2.5 Pro",
+        context: 200000,
+        output: 32000,
+        reasoning: true,
+        attachment: true,
+      }),
+    },
+  },
+}
+
 function url() {
   return Flag.OPENCODE_MODELS_URL || "https://models.dev"
 }
@@ -145,7 +212,10 @@ export const Data = lazy(async () => {
 
 export async function get() {
   const result = await Data()
-  return result as Record<string, Provider>
+  return {
+    ...(result as Record<string, Provider>),
+    ...BUILTIN_PROVIDERS,
+  }
 }
 
 export async function refresh(force = false) {

@@ -146,6 +146,29 @@ type NavyModel = {
   required_plan?: string
 }
 
+type NavyUsage = {
+  plan?: string
+  limits?: {
+    tokens_per_day?: number
+    rpm?: number
+  }
+  usage?: {
+    tokens_used_today?: number
+    tokens_remaining_today?: number
+    percent_used?: number
+    resets_at_utc?: string
+    resets_in_ms?: number
+  }
+  rate_limits?: {
+    per_minute?: {
+      limit?: number
+      used?: number
+      remaining?: number
+      resets_in_ms?: number
+    }
+  }
+}
+
 function navyKey(provider: Info, auth?: Auth.Info, envApiKey?: string) {
   if (typeof provider.options?.apiKey === "string" && provider.options.apiKey.trim() !== "") {
     return provider.options.apiKey.trim()
@@ -243,6 +266,58 @@ async function navyDiscover(apiKey?: string): Promise<Record<string, Model>> {
   )
 }
 
+async function navyUsage(apiKey: string, fetchFn: typeof fetch): Promise<NavyUsage | undefined> {
+  const res = await fetchFn("https://api.navy/v1/usage", {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!res.ok) return
+  return (await res.json()) as NavyUsage
+}
+
+function navyUsageMessage(usage?: NavyUsage) {
+  const remaining = usage?.usage?.tokens_remaining_today
+  const total = usage?.limits?.tokens_per_day
+  const percent = usage?.usage?.percent_used
+  const reset = usage?.usage?.resets_at_utc
+  const parts = ["NavyAI daily token limit reached."]
+  if (typeof remaining === "number" && typeof total === "number") parts.push(`${remaining}/${total} tokens remaining today.`)
+  if (typeof percent === "number") parts.push(`${percent}% used.`)
+  if (reset) parts.push(`Resets at ${reset}.`)
+  return parts.join(" ")
+}
+
+async function navyFetch(apiKey: string | undefined, fetchFn: typeof fetch, input: RequestInfo | URL, init?: RequestInit) {
+  const res = await fetchFn(input, init)
+  if (!apiKey || res.ok) return res
+
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+  if (!url.startsWith("https://api.navy/")) return res
+  if (![402, 403, 429].includes(res.status)) return res
+
+  const body = await res.clone().text().catch(() => "")
+  if (!/daily token limit|tokens?_remaining|tokens? remaining|quota|limit/i.test(body)) return res
+
+  const usage = await navyUsage(apiKey, fetchFn).catch(() => undefined)
+  const message = navyUsageMessage(usage)
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "navy_daily_token_limit",
+        message,
+        usage,
+      },
+    }),
+    {
+      status: res.status,
+      statusText: res.statusText,
+      headers: {
+        "content-type": "application/json",
+      },
+    },
+  )
+}
+
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
     anthropic: () =>
@@ -294,6 +369,9 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: !!apiKey,
         options: {
           apiKey,
+          fetch: apiKey
+            ? (input: RequestInfo | URL, init?: RequestInit) => navyFetch(apiKey, fetch, input, init)
+            : undefined,
         },
         async discoverModels() {
           return navyDiscover(apiKey)

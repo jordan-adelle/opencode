@@ -413,6 +413,79 @@ test("navy provider discovers chat completion models", async () => {
   }
 })
 
+test("navy provider enriches daily limit errors with usage", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(JSON.stringify({ object: "list", data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    if (url === "https://api.navy/v1/chat/completions") {
+      return new Response(JSON.stringify({ error: { message: "You have exceeded your daily token limit." } }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    if (url === "https://api.navy/v1/usage") {
+      return new Response(
+        JSON.stringify({
+          plan: "Free",
+          limits: { tokens_per_day: 150000, rpm: 20 },
+          usage: {
+            tokens_used_today: 144736,
+            tokens_remaining_today: 5264,
+            percent_used: 96.5,
+            resets_at_utc: "2026-04-26T00:00:00.000Z",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        const providerFetch = providers[ProviderID.navy].options.fetch
+        expect(providerFetch).toBeFunction()
+
+        const res = await providerFetch("https://api.navy/v1/chat/completions", {
+          method: "POST",
+          body: JSON.stringify({ messages: [] }),
+        })
+        const body = await res.json()
+
+        expect(res.status).toBe(429)
+        expect(body.error.code).toBe("navy_daily_token_limit")
+        expect(body.error.message).toContain("5264/150000 tokens remaining today")
+        expect(body.error.usage.usage.percent_used).toBe(96.5)
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
 test("env variable takes precedence, config merges options", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

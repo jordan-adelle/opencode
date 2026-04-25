@@ -188,6 +188,21 @@ export function parseAPICallError(input: { providerID: ProviderID; error: APICal
     }
   }
 
+  if (
+    input.providerID === "navy" &&
+    (body?.error?.code === "navy_daily_token_limit" || /daily token limit|tokens? remaining today/i.test(m))
+  ) {
+    return {
+      type: "api_error",
+      message: m,
+      statusCode: input.error.statusCode,
+      isRetryable: false,
+      responseHeaders: input.error.responseHeaders,
+      responseBody: input.error.responseBody,
+      metadata: input.error.url ? { url: input.error.url } : undefined,
+    }
+  }
+
   const metadata = input.error.url ? { url: input.error.url } : undefined
   return {
     type: "api_error",

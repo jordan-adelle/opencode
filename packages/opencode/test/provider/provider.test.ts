@@ -450,6 +450,7 @@ test("navy provider enriches daily limit errors with usage", async () => {
             tokens_remaining_today: 5264,
             percent_used: 96.5,
             resets_at_utc: "2026-04-26T00:00:00.000Z",
+            resets_in_ms: 18162901,
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -479,6 +480,7 @@ test("navy provider enriches daily limit errors with usage", async () => {
         expect(body.error.code).toBe("navy_daily_token_limit")
         expect(body.error.message).toContain("5264/150000 tokens remaining today")
         expect(body.error.usage.usage.percent_used).toBe(96.5)
+        expect(res.headers.get("retry-after-ms")).toBe("18177901")
       },
     })
   } finally {

@@ -192,11 +192,12 @@ export function parseAPICallError(input: { providerID: ProviderID; error: APICal
     input.providerID === "navy" &&
     (body?.error?.code === "navy_daily_token_limit" || /daily token limit|tokens? remaining today/i.test(m))
   ) {
+    const retryAfterMs = input.error.responseHeaders?.["retry-after-ms"]
     return {
       type: "api_error",
       message: m,
       statusCode: input.error.statusCode,
-      isRetryable: false,
+      isRetryable: retryAfterMs !== undefined,
       responseHeaders: input.error.responseHeaders,
       responseBody: input.error.responseBody,
       metadata: input.error.url ? { url: input.error.url } : undefined,

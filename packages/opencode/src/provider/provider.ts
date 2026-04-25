@@ -169,6 +169,8 @@ type NavyUsage = {
   }
 }
 
+const NAVY_USAGE_RETRY_GRACE_MS = 15_000
+
 function navyKey(provider: Info, auth?: Auth.Info, envApiKey?: string) {
   if (typeof provider.options?.apiKey === "string" && provider.options.apiKey.trim() !== "") {
     return provider.options.apiKey.trim()
@@ -287,6 +289,12 @@ function navyUsageMessage(usage?: NavyUsage) {
   return parts.join(" ")
 }
 
+function navyRetryAfterMs(usage?: NavyUsage) {
+  const reset = usage?.usage?.resets_in_ms
+  if (typeof reset !== "number" || reset < 0) return
+  return String(Math.ceil(reset + NAVY_USAGE_RETRY_GRACE_MS))
+}
+
 async function navyFetch(apiKey: string | undefined, fetchFn: typeof fetch, input: RequestInfo | URL, init?: RequestInit) {
   const res = await fetchFn(input, init)
   if (!apiKey || res.ok) return res
@@ -300,6 +308,7 @@ async function navyFetch(apiKey: string | undefined, fetchFn: typeof fetch, inpu
 
   const usage = await navyUsage(apiKey, fetchFn).catch(() => undefined)
   const message = navyUsageMessage(usage)
+  const retryAfterMs = navyRetryAfterMs(usage)
   return new Response(
     JSON.stringify({
       error: {
@@ -313,6 +322,7 @@ async function navyFetch(apiKey: string | undefined, fetchFn: typeof fetch, inpu
       statusText: res.statusText,
       headers: {
         "content-type": "application/json",
+        ...(retryAfterMs ? { "retry-after-ms": retryAfterMs } : {}),
       },
     },
   )

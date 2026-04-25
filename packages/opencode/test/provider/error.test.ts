@@ -4,13 +4,13 @@ import { APICallError } from "ai"
 import { parseAPICallError } from "../../src/provider/error"
 import { ProviderID } from "../../src/provider/schema"
 
-test("navy daily token limit errors are not retried", () => {
+test("navy daily token limit errors retry when reset delay is known", () => {
   const error = new APICallError({
     message: "Too Many Requests",
     url: "https://api.navy/v1/chat/completions",
     requestBodyValues: {},
     statusCode: 429,
-    responseHeaders: {},
+    responseHeaders: { "retry-after-ms": "18177901" },
     responseBody: JSON.stringify({
       error: {
         code: "navy_daily_token_limit",
@@ -26,7 +26,32 @@ test("navy daily token limit errors are not retried", () => {
 
   expect(result.type).toBe("api_error")
   if (result.type !== "api_error") throw new Error("expected API error")
-  expect(result.isRetryable).toBe(false)
+  expect(result.isRetryable).toBe(true)
+  expect(result.responseHeaders?.["retry-after-ms"]).toBe("18177901")
   expect(result.message).toContain("NavyAI daily token limit reached")
   expect(result.message).toContain("5264/150000 tokens remaining today")
+})
+
+test("navy daily token limit errors stop when reset delay is unknown", () => {
+  const error = new APICallError({
+    message: "Too Many Requests",
+    url: "https://api.navy/v1/chat/completions",
+    requestBodyValues: {},
+    statusCode: 429,
+    responseHeaders: {},
+    responseBody: JSON.stringify({
+      error: {
+        code: "navy_daily_token_limit",
+        message: "NavyAI daily token limit reached.",
+      },
+    }),
+    isRetryable: true,
+    data: undefined,
+  })
+
+  const result = parseAPICallError({ providerID: ProviderID.navy, error })
+
+  expect(result.type).toBe("api_error")
+  if (result.type !== "api_error") throw new Error("expected API error")
+  expect(result.isRetryable).toBe(false)
 })

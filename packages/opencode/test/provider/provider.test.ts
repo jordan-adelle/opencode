@@ -488,7 +488,7 @@ test("navy provider enriches daily limit errors with usage", async () => {
   }
 })
 
-test("navy provider marks trailing assistant messages as prefix", async () => {
+test("navy provider appends empty assistant prefix after trailing assistant messages", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
@@ -543,7 +543,9 @@ test("navy provider marks trailing assistant messages as prefix", async () => {
         })
 
         expect(bodies).toHaveLength(1)
-        expect((bodies[0] as { messages: Array<{ prefix?: boolean }> }).messages.at(-1)?.prefix).toBe(true)
+        const messages = (bodies[0] as { messages: Array<{ content?: string; prefix?: boolean; role: string }> }).messages
+        expect(messages.at(-2)).toEqual({ role: "assistant", content: "Partial answer" })
+        expect(messages.at(-1)).toEqual({ role: "assistant", content: "", prefix: true })
       },
     })
   } finally {

@@ -308,7 +308,7 @@ function navyPrepareRequest(input: RequestInfo | URL, init?: RequestInit) {
       ...init,
       body: JSON.stringify({
         ...body,
-        messages: [...body.messages!.slice(0, -1), { ...last, prefix: true }],
+        messages: [...body.messages!, { role: "assistant", content: "", prefix: true }],
       }),
     }
   } catch {

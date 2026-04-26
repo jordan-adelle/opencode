@@ -308,7 +308,13 @@ function navyPrepareRequest(input: RequestInfo | URL, init?: RequestInit) {
       ...init,
       body: JSON.stringify({
         ...body,
-        messages: [...body.messages!, { role: "assistant", content: "", prefix: true }],
+        messages: [
+          ...body.messages!,
+          {
+            role: "user",
+            content: "Continue from the previous assistant message. Do not repeat any text already written.",
+          },
+        ],
       }),
     }
   } catch {

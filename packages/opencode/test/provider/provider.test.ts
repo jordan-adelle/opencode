@@ -488,7 +488,7 @@ test("navy provider enriches daily limit errors with usage", async () => {
   }
 })
 
-test("navy provider appends empty assistant prefix after trailing assistant messages", async () => {
+test("navy provider appends continuation user after trailing assistant messages", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       await Bun.write(
@@ -545,7 +545,10 @@ test("navy provider appends empty assistant prefix after trailing assistant mess
         expect(bodies).toHaveLength(1)
         const messages = (bodies[0] as { messages: Array<{ content?: string; prefix?: boolean; role: string }> }).messages
         expect(messages.at(-2)).toEqual({ role: "assistant", content: "Partial answer" })
-        expect(messages.at(-1)).toEqual({ role: "assistant", content: "", prefix: true })
+        expect(messages.at(-1)).toEqual({
+          role: "user",
+          content: "Continue from the previous assistant message. Do not repeat any text already written.",
+        })
       },
     })
   } finally {

@@ -295,8 +295,30 @@ function navyRetryAfterMs(usage?: NavyUsage) {
   return String(Math.ceil(reset + NAVY_USAGE_RETRY_GRACE_MS))
 }
 
+function navyPrepareRequest(input: RequestInfo | URL, init?: RequestInit) {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+  if (!url.startsWith("https://api.navy/v1/chat/completions")) return init
+  if (init?.method !== "POST" || typeof init.body !== "string") return init
+
+  try {
+    const body = JSON.parse(init.body) as { messages?: Array<{ role?: string; prefix?: boolean }> }
+    const last = body.messages?.at(-1)
+    if (last?.role !== "assistant") return init
+    return {
+      ...init,
+      body: JSON.stringify({
+        ...body,
+        messages: [...body.messages!.slice(0, -1), { ...last, prefix: true }],
+      }),
+    }
+  } catch {
+    return init
+  }
+}
+
 async function navyFetch(apiKey: string | undefined, fetchFn: typeof fetch, input: RequestInfo | URL, init?: RequestInit) {
-  const res = await fetchFn(input, init)
+  const opts = navyPrepareRequest(input, init)
+  const res = await fetchFn(input, opts)
   if (!apiKey || res.ok) return res
 
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url

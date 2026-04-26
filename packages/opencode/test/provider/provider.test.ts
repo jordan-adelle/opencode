@@ -488,6 +488,69 @@ test("navy provider enriches daily limit errors with usage", async () => {
   }
 })
 
+test("navy provider marks trailing assistant messages as prefix", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const bodies: unknown[] = []
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(JSON.stringify({ object: "list", data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    if (url === "https://api.navy/v1/chat/completions") {
+      if (typeof init?.body === "string") bodies.push(JSON.parse(init.body))
+      return new Response(JSON.stringify({ id: "chatcmpl-test" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        const providerFetch = providers[ProviderID.navy].options.fetch
+        expect(providerFetch).toBeFunction()
+
+        await providerFetch("https://api.navy/v1/chat/completions", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "codestral-latest",
+            messages: [
+              { role: "user", content: "Continue" },
+              { role: "assistant", content: "Partial answer" },
+            ],
+          }),
+        })
+
+        expect(bodies).toHaveLength(1)
+        expect((bodies[0] as { messages: Array<{ prefix?: boolean }> }).messages.at(-1)?.prefix).toBe(true)
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
 test("env variable takes precedence, config merges options", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

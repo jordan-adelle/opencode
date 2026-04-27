@@ -374,6 +374,30 @@ test("navy provider discovers chat completion models", async () => {
               endpoint: "/v1/chat/completions",
               premium: true,
               required_plan: "Max",
+              context_window: 1000000,
+              max_output_tokens: 128000,
+              input_modalities: ["text", "image"],
+              output_modalities: ["text"],
+              supports_vision: true,
+              supports_tools: true,
+              supports_function_calling: true,
+              supports_reasoning: true,
+              supports_audio_input: false,
+              supports_image_output: false,
+            },
+            {
+              id: "devious-uncensored",
+              object: "model",
+              owned_by: "navyai",
+              endpoint: "/v1/chat/completions",
+              context_window: null,
+              max_output_tokens: null,
+              input_modalities: null,
+              output_modalities: null,
+              supports_vision: null,
+              supports_tools: null,
+              supports_function_calling: null,
+              supports_reasoning: null,
             },
             {
               id: "gpt-image-2",
@@ -386,6 +410,12 @@ test("navy provider discovers chat completion models", async () => {
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       )
+    }
+    if (url === "https://api.navy/v1/usage") {
+      return new Response(JSON.stringify({ plan: "Max" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
     }
     return fetch(input, init)
   }) as typeof fetch
@@ -404,10 +434,104 @@ test("navy provider discovers chat completion models", async () => {
         expect(model.api.npm).toBe("@ai-sdk/openai-compatible")
         expect(model.capabilities.attachment).toBe(true)
         expect(model.capabilities.toolcall).toBe(true)
-        expect(model.limit.context).toBe(200000)
+        expect(model.capabilities.reasoning).toBe(true)
+        expect(model.capabilities.input.image).toBe(true)
+        expect(model.capabilities.input.pdf).toBe(false)
+        expect(model.limit.context).toBe(1000000)
+        expect(model.limit.output).toBe(128000)
+        const unknown = providers[ProviderID.navy].models["devious-uncensored"]
+        expect(unknown).toBeDefined()
+        expect(unknown.limit.context).toBe(128000)
+        expect(unknown.limit.output).toBe(8192)
+        expect(unknown.capabilities.toolcall).toBe(true)
         expect(providers[ProviderID.navy].models["gpt-image-2"]).toBeUndefined()
       },
     })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
+test("navy provider filters discovered models by current plan", async () => {
+  const cases: Array<{ plan: string; expected: string[] }> = [
+    { plan: "Free", expected: ["free-model"] },
+    { plan: "Small", expected: ["free-model", "premium-model"] },
+    { plan: "Basic", expected: ["free-model", "premium-model"] },
+    { plan: "Plus", expected: ["free-model", "premium-model", "plus-model"] },
+    { plan: "Max", expected: ["free-model", "premium-model", "plus-model", "max-model"] },
+    { plan: "Admin", expected: ["admin-model", "free-model", "max-model", "plus-model", "premium-model"] },
+  ]
+
+  let currentPlan = "Free"
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(
+        JSON.stringify({
+          object: "list",
+          data: [
+            { id: "free-model", object: "model", endpoint: "/v1/chat/completions", premium: false },
+            { id: "premium-model", object: "model", endpoint: "/v1/chat/completions", premium: true },
+            {
+              id: "plus-model",
+              object: "model",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Plus",
+            },
+            {
+              id: "max-model",
+              object: "model",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Max",
+            },
+            {
+              id: "admin-model",
+              object: "model",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Admin",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }
+    if (url === "https://api.navy/v1/usage") {
+      return new Response(JSON.stringify({ plan: currentPlan }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    for (const item of cases) {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(
+            path.join(dir, "opencode.json"),
+            JSON.stringify({
+              $schema: "https://opencode.ai/config.json",
+            }),
+          )
+        },
+      })
+      currentPlan = item.plan
+      await Instance.provide({
+        directory: tmp.path,
+        init: async () => {
+          set("NAVY_API_KEY", "sk-navy-test-key")
+        },
+        fn: async () => {
+          const models = Object.keys((await list())[ProviderID.navy].models).sort()
+          expect(models).toEqual(item.expected.sort())
+        },
+      })
+    }
   } finally {
     globalThis.fetch = fetch
   }

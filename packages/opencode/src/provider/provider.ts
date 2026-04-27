@@ -144,6 +144,16 @@ type NavyModel = {
   endpoint?: string
   premium?: boolean
   required_plan?: string
+  context_window?: number | null
+  max_output_tokens?: number | null
+  input_modalities?: string[] | null
+  output_modalities?: string[] | null
+  supports_vision?: boolean | null
+  supports_tools?: boolean | null
+  supports_function_calling?: boolean | null
+  supports_reasoning?: boolean | null
+  supports_audio_input?: boolean | null
+  supports_image_output?: boolean | null
 }
 
 type NavyUsage = {
@@ -209,9 +219,69 @@ function navyLimit(id: string) {
   return { context: 128000, output: 8192 }
 }
 
+function navyModalities(values?: string[] | null) {
+  return new Set(
+    (values ?? [])
+      .flatMap((value) => value.split(/[,+>\-]+/))
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  )
+}
+
+function navyKnownBoolean(value: boolean | null | undefined, fallback: boolean) {
+  return typeof value === "boolean" ? value : fallback
+}
+
+function navyModelLimit(item: NavyModel) {
+  const fallback = navyLimit(item.id)
+  return {
+    context: typeof item.context_window === "number" && item.context_window > 0 ? item.context_window : fallback.context,
+    output: typeof item.max_output_tokens === "number" && item.max_output_tokens > 0 ? item.max_output_tokens : fallback.output,
+  }
+}
+
+function navyPlanRank(plan?: string) {
+  switch (plan?.trim().toLowerCase()) {
+    case "small":
+    case "basic":
+      return 1
+    case "plus":
+      return 2
+    case "max":
+      return 3
+    case "ultra":
+      return 4
+    case "admin":
+      return 5
+    case "free":
+    default:
+      return 0
+  }
+}
+
+function navyNeedsPlanFilter(models: NavyModel[]) {
+  return models.some((item) => item.premium === true || typeof item.required_plan === "string")
+}
+
+function navyCanUseModel(item: NavyModel, plan?: string) {
+  const current = navyPlanRank(plan)
+  if (typeof item.required_plan === "string" && item.required_plan.trim() !== "") {
+    return current >= navyPlanRank(item.required_plan)
+  }
+  if (item.premium === true) return current >= navyPlanRank("small")
+  return true
+}
+
 function navyModel(item: NavyModel): Model {
-  const attachment = navyAttachment(item.id)
-  const limit = navyLimit(item.id)
+  const input = navyModalities(item.input_modalities)
+  const output = navyModalities(item.output_modalities)
+  const hasInputMetadata = input.size > 0
+  const hasOutputMetadata = output.size > 0
+  const fallbackAttachment = navyAttachment(item.id)
+  const imageInput = hasInputMetadata ? input.has("image") : fallbackAttachment
+  const pdfInput = hasInputMetadata ? input.has("file") || input.has("pdf") : fallbackAttachment
+  const attachment = navyKnownBoolean(item.supports_vision, imageInput || pdfInput || fallbackAttachment) || imageInput || pdfInput
+  const limit = navyModelLimit(item)
   return {
     id: ModelID.make(item.id),
     providerID: ProviderID.navy,
@@ -229,21 +299,21 @@ function navyModel(item: NavyModel): Model {
     limit,
     capabilities: {
       temperature: true,
-      reasoning: navyReasoning(item.id),
+      reasoning: navyKnownBoolean(item.supports_reasoning, navyReasoning(item.id)),
       attachment,
-      toolcall: true,
+      toolcall: navyKnownBoolean(item.supports_tools, navyKnownBoolean(item.supports_function_calling, true)),
       input: {
-        text: true,
-        audio: false,
-        image: attachment,
-        video: false,
-        pdf: attachment,
+        text: hasInputMetadata ? input.has("text") : true,
+        audio: navyKnownBoolean(item.supports_audio_input, hasInputMetadata ? input.has("audio") : false),
+        image: imageInput,
+        video: hasInputMetadata ? input.has("video") : false,
+        pdf: pdfInput,
       },
       output: {
-        text: true,
-        audio: false,
-        image: false,
-        video: false,
+        text: hasOutputMetadata ? output.has("text") : true,
+        audio: hasOutputMetadata ? output.has("audio") : false,
+        image: navyKnownBoolean(item.supports_image_output, hasOutputMetadata ? output.has("image") : false),
+        video: hasOutputMetadata ? output.has("video") : false,
         pdf: false,
       },
       interleaved: false,
@@ -261,9 +331,11 @@ async function navyDiscover(apiKey?: string): Promise<Record<string, Model>> {
   if (!res.ok) return {}
   const body = (await res.json()) as { data?: NavyModel[] }
   if (!Array.isArray(body.data)) return {}
+  const chatModels = body.data.filter((item) => item.endpoint === "/v1/chat/completions")
+  const usage = apiKey && navyNeedsPlanFilter(chatModels) ? await navyUsage(apiKey, fetch).catch(() => undefined) : undefined
   return Object.fromEntries(
-    body.data
-      .filter((item) => item.endpoint === "/v1/chat/completions")
+    chatModels
+      .filter((item) => (usage ? navyCanUseModel(item, usage.plan) : true))
       .map((item) => [item.id, navyModel(item)]),
   )
 }
@@ -1527,6 +1599,10 @@ const layer: Layer.Layer<
           yield* Effect.promise(async () => {
             try {
               const discovered = await discoverModels()
+              if (providerID === ProviderID.navy && Object.keys(discovered).length > 0) {
+                providers[providerID].models = discovered
+                return
+              }
               for (const [modelID, model] of Object.entries(discovered)) {
                 if (!providers[providerID].models[modelID]) {
                   providers[providerID].models[modelID] = model

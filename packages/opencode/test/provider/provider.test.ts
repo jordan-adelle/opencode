@@ -304,6 +304,383 @@ test("custom provider with npm package", async () => {
   })
 })
 
+test("navy provider keeps fallback models when discovery fails", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(JSON.stringify({ error: { message: "boom" } }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        expect(providers[ProviderID.navy]).toBeDefined()
+        expect(providers[ProviderID.navy].models["gpt-5"]).toBeDefined()
+        expect(providers[ProviderID.navy].models["gpt-5"].api.url).toBe("https://api.navy/v1")
+        expect(providers[ProviderID.navy].options.apiKey).toBe("sk-navy-test-key")
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
+test("navy provider discovers chat completion models", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(
+        JSON.stringify({
+          object: "list",
+          data: [
+            {
+              id: "claude-opus-4.7",
+              object: "model",
+              owned_by: "anthropic",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Max",
+              context_window: 1000000,
+              max_output_tokens: 128000,
+              input_modalities: ["text", "image"],
+              output_modalities: ["text"],
+              supports_vision: true,
+              supports_tools: true,
+              supports_function_calling: true,
+              supports_reasoning: true,
+              supports_audio_input: false,
+              supports_image_output: false,
+            },
+            {
+              id: "devious-uncensored",
+              object: "model",
+              owned_by: "navyai",
+              endpoint: "/v1/chat/completions",
+              context_window: null,
+              max_output_tokens: null,
+              input_modalities: null,
+              output_modalities: null,
+              supports_vision: null,
+              supports_tools: null,
+              supports_function_calling: null,
+              supports_reasoning: null,
+            },
+            {
+              id: "gpt-image-2",
+              object: "model",
+              owned_by: "openai",
+              endpoint: "/v1/images/generations",
+              premium: true,
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }
+    if (url === "https://api.navy/v1/usage") {
+      return new Response(JSON.stringify({ plan: "Max" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        const model = providers[ProviderID.navy].models["claude-opus-4.7"]
+        expect(model).toBeDefined()
+        expect(model.family).toBe("anthropic")
+        expect(model.api.npm).toBe("@ai-sdk/openai-compatible")
+        expect(model.capabilities.attachment).toBe(true)
+        expect(model.capabilities.toolcall).toBe(true)
+        expect(model.capabilities.reasoning).toBe(true)
+        expect(model.capabilities.input.image).toBe(true)
+        expect(model.capabilities.input.pdf).toBe(false)
+        expect(model.limit.context).toBe(1000000)
+        expect(model.limit.output).toBe(128000)
+        const unknown = providers[ProviderID.navy].models["devious-uncensored"]
+        expect(unknown).toBeDefined()
+        expect(unknown.limit.context).toBe(128000)
+        expect(unknown.limit.output).toBe(8192)
+        expect(unknown.capabilities.toolcall).toBe(true)
+        expect(providers[ProviderID.navy].models["gpt-image-2"]).toBeUndefined()
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
+test("navy provider filters discovered models by current plan", async () => {
+  const cases: Array<{ plan: string; expected: string[] }> = [
+    { plan: "Free", expected: ["free-model"] },
+    { plan: "Small", expected: ["free-model", "premium-model"] },
+    { plan: "Basic", expected: ["free-model", "premium-model"] },
+    { plan: "Plus", expected: ["free-model", "premium-model", "plus-model"] },
+    { plan: "Max", expected: ["free-model", "premium-model", "plus-model", "max-model"] },
+    { plan: "Admin", expected: ["admin-model", "free-model", "max-model", "plus-model", "premium-model"] },
+  ]
+
+  let currentPlan = "Free"
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(
+        JSON.stringify({
+          object: "list",
+          data: [
+            { id: "free-model", object: "model", endpoint: "/v1/chat/completions", premium: false },
+            { id: "premium-model", object: "model", endpoint: "/v1/chat/completions", premium: true },
+            {
+              id: "plus-model",
+              object: "model",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Plus",
+            },
+            {
+              id: "max-model",
+              object: "model",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Max",
+            },
+            {
+              id: "admin-model",
+              object: "model",
+              endpoint: "/v1/chat/completions",
+              premium: true,
+              required_plan: "Admin",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }
+    if (url === "https://api.navy/v1/usage") {
+      return new Response(JSON.stringify({ plan: currentPlan }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    for (const item of cases) {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(
+            path.join(dir, "opencode.json"),
+            JSON.stringify({
+              $schema: "https://opencode.ai/config.json",
+            }),
+          )
+        },
+      })
+      currentPlan = item.plan
+      await Instance.provide({
+        directory: tmp.path,
+        init: async () => {
+          set("NAVY_API_KEY", "sk-navy-test-key")
+        },
+        fn: async () => {
+          const models = Object.keys((await list())[ProviderID.navy].models).sort()
+          expect(models).toEqual(item.expected.sort())
+        },
+      })
+    }
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
+test("navy provider enriches daily limit errors with usage", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(JSON.stringify({ object: "list", data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    if (url === "https://api.navy/v1/chat/completions") {
+      return new Response(JSON.stringify({ error: { message: "You have exceeded your daily token limit." } }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    if (url === "https://api.navy/v1/usage") {
+      return new Response(
+        JSON.stringify({
+          plan: "Free",
+          limits: { tokens_per_day: 150000, rpm: 20 },
+          usage: {
+            tokens_used_today: 144736,
+            tokens_remaining_today: 5264,
+            percent_used: 96.5,
+            resets_at_utc: "2026-04-26T00:00:00.000Z",
+            resets_in_ms: 18162901,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        const providerFetch = providers[ProviderID.navy].options.fetch
+        expect(providerFetch).toBeFunction()
+
+        const res = await providerFetch("https://api.navy/v1/chat/completions", {
+          method: "POST",
+          body: JSON.stringify({ messages: [] }),
+        })
+        const body = await res.json()
+
+        expect(res.status).toBe(429)
+        expect(body.error.code).toBe("navy_daily_token_limit")
+        expect(body.error.message).toContain("5264/150000 tokens remaining today")
+        expect(body.error.usage.usage.percent_used).toBe(96.5)
+        expect(res.headers.get("retry-after-ms")).toBe("18177901")
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
+test("navy provider marks trailing assistant messages as prefixes", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+        }),
+      )
+    },
+  })
+
+  const bodies: unknown[] = []
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+    if (url === "https://api.navy/v1/models") {
+      return new Response(JSON.stringify({ object: "list", data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    if (url === "https://api.navy/v1/chat/completions") {
+      if (typeof init?.body === "string") bodies.push(JSON.parse(init.body))
+      return new Response(JSON.stringify({ id: "chatcmpl-test" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return fetch(input, init)
+  }) as typeof fetch
+
+  try {
+    await Instance.provide({
+      directory: tmp.path,
+      init: async () => {
+        set("NAVY_API_KEY", "sk-navy-test-key")
+      },
+      fn: async () => {
+        const providers = await list()
+        const providerFetch = providers[ProviderID.navy].options.fetch
+        expect(providerFetch).toBeFunction()
+
+        await providerFetch("https://api.navy/v1/chat/completions", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "codestral-latest",
+            messages: [
+              { role: "user", content: "Continue" },
+              { role: "assistant", content: "Partial answer" },
+            ],
+          }),
+        })
+
+        expect(bodies).toHaveLength(1)
+        const messages = (bodies[0] as { messages: Array<{ content?: string; prefix?: boolean; role: string }> }).messages
+        expect(messages).toHaveLength(2)
+        expect(messages.at(-1)).toEqual({
+          role: "assistant",
+          content: "Partial answer",
+          prefix: true,
+        })
+      },
+    })
+  } finally {
+    globalThis.fetch = fetch
+  }
+})
+
 test("env variable takes precedence, config merges options", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

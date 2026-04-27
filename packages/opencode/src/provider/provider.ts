@@ -138,6 +138,288 @@ function useLanguageModel(sdk: any) {
   return sdk.responses === undefined && sdk.chat === undefined
 }
 
+type NavyModel = {
+  id: string
+  owned_by?: string
+  endpoint?: string
+  premium?: boolean
+  required_plan?: string
+  context_window?: number | null
+  max_output_tokens?: number | null
+  input_modalities?: string[] | null
+  output_modalities?: string[] | null
+  supports_vision?: boolean | null
+  supports_tools?: boolean | null
+  supports_function_calling?: boolean | null
+  supports_reasoning?: boolean | null
+  supports_audio_input?: boolean | null
+  supports_image_output?: boolean | null
+}
+
+type NavyUsage = {
+  plan?: string
+  limits?: {
+    tokens_per_day?: number
+    rpm?: number
+  }
+  usage?: {
+    tokens_used_today?: number
+    tokens_remaining_today?: number
+    percent_used?: number
+    resets_at_utc?: string
+    resets_in_ms?: number
+  }
+  rate_limits?: {
+    per_minute?: {
+      limit?: number
+      used?: number
+      remaining?: number
+      resets_in_ms?: number
+    }
+  }
+}
+
+const NAVY_USAGE_RETRY_GRACE_MS = 15_000
+
+function navyKey(provider: Info, auth?: Auth.Info, envApiKey?: string) {
+  if (typeof provider.options?.apiKey === "string" && provider.options.apiKey.trim() !== "") {
+    return provider.options.apiKey.trim()
+  }
+  if (auth?.type === "api") return auth.key
+  if (typeof envApiKey === "string" && envApiKey.trim() !== "") return envApiKey.trim()
+}
+
+function navyTitle(id: string) {
+  return id
+    .split(/[-_/]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
+}
+
+function navyReasoning(id: string) {
+  const value = id.toLowerCase()
+  return ["reasoning", "thinking", "o1", "o3", "o4", "gpt-5", "deepseek-r1", "grok-4"].some((item) =>
+    value.includes(item),
+  )
+}
+
+function navyAttachment(id: string) {
+  const value = id.toLowerCase()
+  return ["gpt-4", "gpt-5", "claude", "gemini", "pixtral", "vision", "vl", "image"].some((item) =>
+    value.includes(item),
+  )
+}
+
+function navyLimit(id: string) {
+  const value = id.toLowerCase()
+  if (value.includes("claude")) return { context: 200000, output: 16384 }
+  if (value.includes("gemini")) return { context: 200000, output: 32000 }
+  if (value.includes("gpt-5")) return { context: 128000, output: 8192 }
+  return { context: 128000, output: 8192 }
+}
+
+function navyModalities(values?: string[] | null) {
+  return new Set(
+    (values ?? [])
+      .flatMap((value) => value.split(/[,+>\-]+/))
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  )
+}
+
+function navyKnownBoolean(value: boolean | null | undefined, fallback: boolean) {
+  return typeof value === "boolean" ? value : fallback
+}
+
+function navyModelLimit(item: NavyModel) {
+  const fallback = navyLimit(item.id)
+  return {
+    context: typeof item.context_window === "number" && item.context_window > 0 ? item.context_window : fallback.context,
+    output: typeof item.max_output_tokens === "number" && item.max_output_tokens > 0 ? item.max_output_tokens : fallback.output,
+  }
+}
+
+function navyPlanRank(plan?: string) {
+  switch (plan?.trim().toLowerCase()) {
+    case "small":
+    case "basic":
+      return 1
+    case "plus":
+      return 2
+    case "max":
+      return 3
+    case "ultra":
+      return 4
+    case "admin":
+      return 5
+    case "free":
+    default:
+      return 0
+  }
+}
+
+function navyNeedsPlanFilter(models: NavyModel[]) {
+  return models.some((item) => item.premium === true || typeof item.required_plan === "string")
+}
+
+function navyCanUseModel(item: NavyModel, plan?: string) {
+  const current = navyPlanRank(plan)
+  if (typeof item.required_plan === "string" && item.required_plan.trim() !== "") {
+    return current >= navyPlanRank(item.required_plan)
+  }
+  if (item.premium === true) return current >= navyPlanRank("small")
+  return true
+}
+
+function navyModel(item: NavyModel): Model {
+  const input = navyModalities(item.input_modalities)
+  const output = navyModalities(item.output_modalities)
+  const hasInputMetadata = input.size > 0
+  const hasOutputMetadata = output.size > 0
+  const fallbackAttachment = navyAttachment(item.id)
+  const imageInput = hasInputMetadata ? input.has("image") : fallbackAttachment
+  const pdfInput = hasInputMetadata ? input.has("file") || input.has("pdf") : fallbackAttachment
+  const attachment = navyKnownBoolean(item.supports_vision, imageInput || pdfInput || fallbackAttachment) || imageInput || pdfInput
+  const limit = navyModelLimit(item)
+  return {
+    id: ModelID.make(item.id),
+    providerID: ProviderID.navy,
+    name: navyTitle(item.id),
+    family: item.owned_by ?? "",
+    api: {
+      id: item.id,
+      url: "https://api.navy/v1",
+      npm: "@ai-sdk/openai-compatible",
+    },
+    status: "active",
+    headers: {},
+    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit,
+    capabilities: {
+      temperature: true,
+      reasoning: navyKnownBoolean(item.supports_reasoning, navyReasoning(item.id)),
+      attachment,
+      toolcall: navyKnownBoolean(item.supports_tools, navyKnownBoolean(item.supports_function_calling, true)),
+      input: {
+        text: hasInputMetadata ? input.has("text") : true,
+        audio: navyKnownBoolean(item.supports_audio_input, hasInputMetadata ? input.has("audio") : false),
+        image: imageInput,
+        video: hasInputMetadata ? input.has("video") : false,
+        pdf: pdfInput,
+      },
+      output: {
+        text: hasOutputMetadata ? output.has("text") : true,
+        audio: hasOutputMetadata ? output.has("audio") : false,
+        image: navyKnownBoolean(item.supports_image_output, hasOutputMetadata ? output.has("image") : false),
+        video: hasOutputMetadata ? output.has("video") : false,
+        pdf: false,
+      },
+      interleaved: false,
+    },
+    release_date: "",
+    variants: {},
+  }
+}
+
+async function navyDiscover(apiKey?: string): Promise<Record<string, Model>> {
+  const res = await fetch("https://api.navy/v1/models", {
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!res.ok) return {}
+  const body = (await res.json()) as { data?: NavyModel[] }
+  if (!Array.isArray(body.data)) return {}
+  const chatModels = body.data.filter((item) => item.endpoint === "/v1/chat/completions")
+  const usage = apiKey && navyNeedsPlanFilter(chatModels) ? await navyUsage(apiKey, fetch).catch(() => undefined) : undefined
+  return Object.fromEntries(
+    chatModels
+      .filter((item) => (usage ? navyCanUseModel(item, usage.plan) : true))
+      .map((item) => [item.id, navyModel(item)]),
+  )
+}
+
+async function navyUsage(apiKey: string, fetchFn: typeof fetch): Promise<NavyUsage | undefined> {
+  const res = await fetchFn("https://api.navy/v1/usage", {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!res.ok) return
+  return (await res.json()) as NavyUsage
+}
+
+function navyUsageMessage(usage?: NavyUsage) {
+  const remaining = usage?.usage?.tokens_remaining_today
+  const total = usage?.limits?.tokens_per_day
+  const percent = usage?.usage?.percent_used
+  const reset = usage?.usage?.resets_at_utc
+  const parts = ["NavyAI daily token limit reached."]
+  if (typeof remaining === "number" && typeof total === "number") parts.push(`${remaining}/${total} tokens remaining today.`)
+  if (typeof percent === "number") parts.push(`${percent}% used.`)
+  if (reset) parts.push(`Resets at ${reset}.`)
+  return parts.join(" ")
+}
+
+function navyRetryAfterMs(usage?: NavyUsage) {
+  const reset = usage?.usage?.resets_in_ms
+  if (typeof reset !== "number" || reset < 0) return
+  return String(Math.ceil(reset + NAVY_USAGE_RETRY_GRACE_MS))
+}
+
+function navyPrepareRequest(input: RequestInfo | URL, init?: RequestInit) {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+  if (!url.startsWith("https://api.navy/v1/chat/completions")) return init
+  if (init?.method !== "POST" || typeof init.body !== "string") return init
+
+  try {
+    const body = JSON.parse(init.body) as { messages?: Array<{ role?: string; prefix?: boolean }> }
+    const last = body.messages?.at(-1)
+    if (last?.role !== "assistant") return init
+    last.prefix = true
+    return {
+      ...init,
+      body: JSON.stringify(body),
+    }
+  } catch {
+    return init
+  }
+}
+
+async function navyFetch(apiKey: string | undefined, fetchFn: typeof fetch, input: RequestInfo | URL, init?: RequestInit) {
+  const opts = navyPrepareRequest(input, init)
+  const res = await fetchFn(input, opts)
+  if (!apiKey || res.ok) return res
+
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+  if (!url.startsWith("https://api.navy/")) return res
+  if (![402, 403, 429].includes(res.status)) return res
+
+  const body = await res.clone().text().catch(() => "")
+  if (!/daily token limit|tokens?_remaining|tokens? remaining|quota|limit/i.test(body)) return res
+
+  const usage = await navyUsage(apiKey, fetchFn).catch(() => undefined)
+  const message = navyUsageMessage(usage)
+  const retryAfterMs = navyRetryAfterMs(usage)
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "navy_daily_token_limit",
+        message,
+        usage,
+      },
+    }),
+    {
+      status: res.status,
+      statusText: res.statusText,
+      headers: {
+        "content-type": "application/json",
+        ...(retryAfterMs ? { "retry-after-ms": retryAfterMs } : {}),
+      },
+    },
+  )
+}
+
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
     anthropic: () =>
@@ -180,6 +462,24 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         },
         options: {},
       }),
+    navy: Effect.fnUntraced(function* (provider: Info) {
+      const auth = yield* dep.auth(provider.id)
+      const envApiKey = yield* dep.get("NAVY_API_KEY")
+      const apiKey = navyKey(provider, auth, envApiKey)
+
+      return {
+        autoload: !!apiKey,
+        options: {
+          apiKey,
+          fetch: apiKey
+            ? (input: RequestInfo | URL, init?: RequestInit) => navyFetch(apiKey, fetch, input, init)
+            : undefined,
+        },
+        async discoverModels() {
+          return navyDiscover(apiKey)
+        },
+      }
+    }),
     xai: () =>
       Effect.succeed({
         autoload: false,
@@ -1284,18 +1584,24 @@ const layer: Layer.Layer<
           mergeProvider(providerID, partial)
         }
 
-        const gitlab = ProviderID.make("gitlab")
-        if (discoveryLoaders[gitlab] && providers[gitlab] && isProviderAllowed(gitlab)) {
+        for (const [id, discoverModels] of Object.entries(discoveryLoaders)) {
+          const providerID = ProviderID.make(id)
+          if (!providers[providerID] || !isProviderAllowed(providerID)) continue
+
           yield* Effect.promise(async () => {
             try {
-              const discovered = await discoveryLoaders[gitlab]()
+              const discovered = await discoverModels()
+              if (providerID === ProviderID.navy && Object.keys(discovered).length > 0) {
+                providers[providerID].models = discovered
+                return
+              }
               for (const [modelID, model] of Object.entries(discovered)) {
-                if (!providers[gitlab].models[modelID]) {
-                  providers[gitlab].models[modelID] = model
+                if (!providers[providerID].models[modelID]) {
+                  providers[providerID].models[modelID] = model
                 }
               }
             } catch (e) {
-              log.warn("state discovery error", { id: "gitlab", error: e })
+              log.warn("state discovery error", { id, error: e })
             }
           })
         }

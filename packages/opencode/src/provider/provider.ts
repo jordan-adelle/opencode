@@ -376,18 +376,10 @@ function navyPrepareRequest(input: RequestInfo | URL, init?: RequestInit) {
     const body = JSON.parse(init.body) as { messages?: Array<{ role?: string; prefix?: boolean }> }
     const last = body.messages?.at(-1)
     if (last?.role !== "assistant") return init
+    last.prefix = true
     return {
       ...init,
-      body: JSON.stringify({
-        ...body,
-        messages: [
-          ...body.messages!,
-          {
-            role: "user",
-            content: "Continue from the previous assistant message. Do not repeat any text already written.",
-          },
-        ],
-      }),
+      body: JSON.stringify(body),
     }
   } catch {
     return init
